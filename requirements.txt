@@ -1,0 +1,14 @@
+streamlit
+neo4j
+requests
+pandas
+numpy
+scikit-learn
+sentence-transformers
+mistralai
+python-dotenv
+plotly
+streamlit-authenticator
+pydantic
+mistralai
+beautifulsoup4
