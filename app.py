@@ -531,10 +531,19 @@ elif menu_options[selected_menu] == "search":
             if show_only_new and vacancy.published_at:
                 from datetime import datetime, timedelta
 
-                if datetime.now() - vacancy.published_at > timedelta(days=30):
-                    continue
+                now = datetime.now()
+                published = vacancy.published_at
 
-            displayed_count += 1
+                # Убираем временную зону если она есть
+                if hasattr(published, 'tzinfo') and published.tzinfo is not None:
+                    published = published.replace(tzinfo=None)
+
+                # Проверяем что published не в будущем
+                if published > now:
+                    published = now - timedelta(days=1)
+
+                if now - published > timedelta(days=30):
+                    continue
 
             # Карточка вакансии
             with st.container():
@@ -879,18 +888,28 @@ elif menu_options[selected_menu] == "analytics":
             st.metric("📨 Откликов", stats['applies'])
 
     # История действий
-    st.markdown("### 📜 История ваших действий")
+        # История действий
+        st.markdown("### 📜 История ваших действий")
 
-    if st.session_state.feedback_history:
-        history_data = []
-        for item in st.session_state.feedback_history:
-            history_data.append({
-                'Дата': item.get('timestamp'),
-                'Тип': item.get('feedback_type'),
-                'Вакансия': item.get('vacancy_title', '')[:50]
-            })
+        if st.session_state.feedback_history:
+            history_data = []
+            for item in st.session_state.feedback_history:
+                # Безопасное извлечение названия вакансии
+                vacancy_title = item.get('vacancy_title')
+                if vacancy_title is None:
+                    vacancy_title = ''
+                elif isinstance(vacancy_title, str):
+                    vacancy_title = vacancy_title[:50]
+                else:
+                    vacancy_title = str(vacancy_title)[:50]
 
-        df_history = pd.DataFrame(history_data)
+                history_data.append({
+                    'Дата': item.get('timestamp'),
+                    'Тип': item.get('feedback_type'),
+                    'Вакансия': vacancy_title
+                })
+
+            df_history = pd.DataFrame(history_data)
 
         if 'Дата' in df_history.columns:
             df_history['Дата'] = pd.to_datetime(df_history['Дата'])
