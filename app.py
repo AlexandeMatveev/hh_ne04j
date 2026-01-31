@@ -5,6 +5,7 @@ from datetime import datetime
 import numpy as np
 import atexit
 import logging
+import asyncio
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -434,69 +435,87 @@ elif menu_options[selected_menu] == "search":
         )
 
     with col_settings:
-        limit = st.slider("📊 Количество", 5, 30, 10)
+        limit = st.slider("📊 Количество", 5, 30, 150)
         area = st.selectbox("📍 Регион", ["Москва", "Санкт-Петербург", "Удалённо", "Все"], index=0)
 
     # Кнопка поиска
+    # === ПОИСК ВАКАНСИЙ С КЭШЕМ И АСИНХРОННОСТЬЮ ===
     if st.button("🚀 Начать поиск", type="primary", use_container_width=True):
         if not search_query.strip():
             st.error("⚠️ Введите поисковый запрос")
         else:
             with st.spinner("🔎 Ищем вакансии на HH.ru..."):
                 try:
-                    # Показываем прогресс
-                    progress_bar = st.progress(0)
-                    status_text = st.empty()
+                    # Шаг 1: Получаем ID вакансий через синхронный кэшируемый поиск
+                    @st.cache_data(ttl=300)  # 5 минут
+                    def get_vacancy_ids(query: str, limit: int):
+                        parser = services['parser']
+                        pages = (limit + 100 - 1) // 100
+                        ids = []
+                        for page in range(pages):
+                            remaining = limit - len(ids)
+                            if remaining <= 0:
+                                break
+                            per_page = min(100, remaining)
+                            items = parser.search_vacancies(text=query, per_page=per_page, page=page)
+                            for item in items:
+                                if len(ids) < limit:
+                                    ids.append(item['id'])
+                            if len(items) < per_page:
+                                break
+                        return ids
 
-                    status_text.text("🔄 Подготовка к поиску...")
 
-                    vacancies = services['parser'].fetch_and_parse_vacancies(search_query, limit)
-                    st.session_state.search_results = vacancies
+                    vacancy_ids = get_vacancy_ids(search_query, limit)
+                    st.session_state.search_results = []  # временно пусто
 
-                    progress_bar.progress(100)
-
-                    if vacancies:
-                        st.success(f"✅ Найдено {len(vacancies)} вакансий")
-
-                        # Сохранение вакансий в базу
-                        saved_count = 0
-                        save_progress = st.progress(0)
-
-                        for i, vacancy in enumerate(vacancies):
-                            if services['vacancy_service'].save_vacancy(vacancy):
-                                saved_count += 1
-                            save_progress.progress((i + 1) / len(vacancies))
-
-                        if saved_count > 0:
-                            st.info(f"💾 Сохранено {saved_count} вакансий в базу данных")
-                        else:
-                            st.warning("⚠️ Не удалось сохранить вакансии в базу данных")
+                    if not vacancy_ids:
+                        st.warning("😕 По вашему запросу не найдено вакансий.")
                     else:
-                        st.warning("""
-                        😕 **По вашему запросу не найдено вакансий**  
+                        st.info(f"📥 Загружаем детали {len(vacancy_ids)} вакансий...")
 
-                        **Возможные причины:**
-                        1. Слишком узкий поисковый запрос
-                        2. Проблемы с подключением к HH.ru API
-                        3. В указанном регионе нет вакансий по запросу
+                        # Шаг 2: Асинхронная загрузка деталей
+                        parser = services['parser']
 
-                        **Попробуйте:**
-                        - Использовать более общий запрос (например, "Python" вместо "Python Django Senior")
-                        - Изменить регион поиска
-                        - Проверить подключение к интернету
-                        """)
+                        # Создаём progress bar
+                        progress_bar = st.progress(0)
+                        status_text = st.empty()
+
+
+                        def update_progress(current, total):
+                            progress = int((current / total) * 100)
+                            progress_bar.progress(progress)
+                            status_text.text(f"Загружено {current}/{total} вакансий...")
+
+
+                        # Обёртка для запуска асинхронного кода
+                        async def load_with_progress():
+                            results = []
+                            for i, batch_ids in enumerate(
+                                    [vacancy_ids[i:i + 10] for i in range(0, len(vacancy_ids), 10)]):
+                                batch_results = await parser.fetch_and_parse_vacancies_async(batch_ids)
+                                results.extend(batch_results)
+                                update_progress(len(results), len(vacancy_ids))
+                            return results
+
+
+                        # Запуск асинхронной загрузки
+                        detailed_vacancies = asyncio.run(load_with_progress())
+
+                        # Сохранение в сессию
+                        st.session_state.search_results = detailed_vacancies
+                        st.success(f"✅ Успешно загружено {len(detailed_vacancies)} вакансий!")
+
+                        # Сохранение в базу (опционально)
+                        saved_count = 0
+                        for vac in detailed_vacancies:
+                            if services['vacancy_service'].save_vacancy(vac):
+                                saved_count += 1
+                        if saved_count > 0:
+                            st.info(f"💾 Сохранено {saved_count} вакансий в Neo4j")
 
                 except Exception as e:
-                    st.error(f"""
-                    ❌ **Ошибка при поиске вакансий**  
-
-                    **Детали:** {str(e)}
-
-                    **Решение:**
-                    1. Проверьте подключение к интернету
-                    2. Убедитесь, что HH.ru доступен
-                    3. Попробуйте позже, возможно временные проблемы с API
-                    """)
+                    st.error(f"❌ Ошибка при поиске: {str(e)}")
                     logger.error(f"Search error: {e}", exc_info=True)
 
     # Отображение результатов поиска

@@ -12,3 +12,4 @@ streamlit-authenticator
 pydantic
 mistralai
 beautifulsoup4
+aiohttp
