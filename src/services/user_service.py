@@ -1,5 +1,7 @@
 import logging
 import json
+from typing import List, Dict
+
 from src.database.neo4j_client import Neo4jClient
 from src.database.models import User, FeedbackType
 from src.ai.embeddings import EmbeddingService
@@ -12,6 +14,54 @@ class UserService:
     def __init__(self, neo4j_client, embedding_service):
         self.db = neo4j_client
         self.embedding_service = embedding_service
+        self.neo4j = neo4j_client
+
+    def get_similar_users_vacancies(self, user_id: str, limit: int = 5) -> List[Dict]:
+        """
+        Находит вакансии, которые понравились пользователям с похожими навыками
+        """
+        query = """
+        MATCH (u:User {id: $user_id})-[:HAS_SKILL]->(skill:Skill)
+        WITH u, collect(skill.name) AS user_skills
+
+        // Ищем других пользователей с общими навыками
+        MATCH (other:User)-[:HAS_SKILL]->(common_skill:Skill)
+        WHERE other.id <> u.id 
+          AND common_skill.name IN user_skills
+
+        WITH other, COUNT(common_skill) AS common_count
+        ORDER BY common_count DESC
+        LIMIT 10
+
+        // Получаем вакансии, которым они поставили лайк
+        MATCH (other)-[r:LIKED]->(v:Vacancy)
+
+        // Явно собираем навыки вакансии
+        OPTIONAL MATCH (v)-[:REQUIRES]->(vs:Skill)
+        WITH 
+            v, 
+            other,
+            COUNT(r) AS like_count,
+            COLLECT(DISTINCT vs.name) AS vacancy_skills
+
+        // Фильтруем пустые — ИСПРАВЛЕНО: используем IS NOT NULL
+        WHERE size(vacancy_skills) > 0 OR v.skills IS NOT NULL
+
+        RETURN 
+            v.id AS vacancy_id,
+            v.title AS title,
+            v.company_name AS company,
+            v.salary_from AS salary_from,
+            v.salary_to AS salary_to,
+            v.currency AS currency,
+            COALESCE(vacancy_skills, v.skills, []) AS skills,
+            like_count
+        ORDER BY like_count DESC
+        LIMIT $limit
+        """
+
+        result = self.neo4j.execute_query(query, {'user_id': user_id, 'limit': limit})
+        return result
 
     def create_or_update_user(self, user):
         """Создание или обновление пользователя"""
@@ -72,6 +122,8 @@ class UserService:
 
         user_data = results[0]['u']
         return User.from_dict(user_data)
+
+
 
     def update_user_preferences(self, user_id, feedback_type, skill_weights):
         """Обновление предпочтений пользователя"""

@@ -464,10 +464,50 @@ def render_recommendations_page():
                      title="📊 Распределение оценок", orientation='h', barmode='stack',
                      color_discrete_sequence=['#3B82F6', '#10B981', '#8B5CF6'])
         fig.update_layout(height=400, showlegend=True, yaxis={'categoryorder': 'total ascending'})
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
         # Детали рекомендаций
         st.markdown("### 📋 Детали рекомендаций")
+        # --- БЛОК: "ПОЛЬЗОВАТЕЛИ С ПОХОЖИМИ НАВЫКАМИ ИЩУТ..." ---
+        st.markdown("### 🔍 Пользователи с похожими навыками ищут")
+        with st.spinner("Анализируем поведение..."):
+            try:
+                similar_vacancies = services['user_service'].get_similar_users_vacancies(user.id, limit=5)
+                if similar_vacancies:
+                    for item in similar_vacancies:
+                        col1, col2, col3 = st.columns([3, 2, 1])
+                        with col1:
+                            st.markdown(f"**{item['title']}**")
+                            if item['company']:
+                                st.caption(f"🏢 {item['company']}")
+                        with col2:
+                            salary_parts = []
+                            if item['salary_from']: salary_parts.append(f"от {int(item['salary_from']):,}")
+                            if item['salary_to']: salary_parts.append(f"до {int(item['salary_to']):,}")
+                            if salary_parts and item.get('currency'):
+                                salary_parts[-1] += f" {item['currency']}"
+                            st.markdown(" ".join(salary_parts) if salary_parts else "💰 Не указана")
+
+                        with col3:
+                            actions = ", ".join(
+                                set(a.lower().replace('liked', '👍').replace('viewed', '👁️')) for a in item['actions'])
+                            st.markdown(f"**{actions}**")
+
+                        # Навыки
+                        if item['skills']:
+                            skill_cols = st.columns(min(5, len(item['skills'])))
+                            for i, skill in enumerate(item['skills'][:5]):
+                                with skill_cols[i]:
+                                    st.markdown(f'<div class="skill-tag">{skill}</div>', unsafe_allow_html=True)
+
+                        st.markdown("---")
+                else:
+                    st.info("Пока нет данных о поведении похожих пользователей.")
+            except Exception as e:
+                logger.warning(f"Не удалось загрузить похожие вакансии: {e}")
+                st.info("Не удалось загрузить рекомендации по поведению.")
+
+        # --- КОНЦА БЛОКА ---
         for i, rec in enumerate(st.session_state.recommendations, 1):
             vacancy = rec.vacancy
 
