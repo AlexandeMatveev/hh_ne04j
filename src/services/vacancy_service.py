@@ -312,3 +312,66 @@ class VacancyService:
         except Exception as e:
             logger.warning(f"Could not generate embedding: {e}")
             return None
+
+    # Добавьте в VacancyService
+
+    def get_recommendations(self, user_id: str, top_n: int = 10,
+                            content_weight: float = 0.33,
+                            graph_weight: float = 0.34,
+                            semantic_weight: float = 0.33) -> List:
+        """Получение гибридных рекомендаций"""
+        from src.database.models import RecommendationScore
+
+        # Запрос к Neo4j
+        query = """
+        MATCH (u:User {id: $user_id})-[:HAS_SKILL]->(us:Skill)
+        MATCH (v:Vacancy)-[:REQUIRES]->(vs:Skill)
+        WHERE vs.name IN collect(us.name)
+
+        WITH u, v, collect(DISTINCT us.name) as user_skills,
+             collect(DISTINCT vs.name) as vacancy_skills
+
+        // Content score (совпадение навыков)
+        WITH u, v, user_skills, vacancy_skills,
+             [skill IN user_skills WHERE skill IN vacancy_skills] as matched
+
+        WITH u, v, 
+             size(matched) * 1.0 / size(user_skills + vacancy_skills) as content_score
+
+        // Graph score (компании)
+        OPTIONAL MATCH (u)-[:WORKED_IN]->(c:Company)
+        OPTIONAL MATCH (v)-[:FROM_COMPANY]->(vc:Company)
+
+        WITH u, v, content_score,
+             CASE WHEN vc.name IN collect(c.name) THEN 1.0 ELSE 0.0 END as graph_score
+
+        // Total score
+        RETURN v.id as vacancy_id,
+               content_score,
+               graph_score,
+               (content_score * $content_weight + 
+                graph_score * $graph_weight) as total_score
+        ORDER BY total_score DESC
+        LIMIT $top_n
+        """
+
+        results = self.neo4j.execute_query(query, {
+            'user_id': user_id,
+            'top_n': top_n,
+            'content_weight': content_weight,
+            'graph_weight': graph_weight
+        })
+
+        recommendations = []
+        for r in results:
+            vacancy = self.get_vacancy_by_id(r['vacancy_id'])
+            if vacancy:
+                recommendations.append(RecommendationScore(
+                    vacancy=vacancy,
+                    content_score=r['content_score'],
+                    graph_score=r['graph_score'],
+                    semantic_score=0,  # можно добавить позже
+                    total_score=r['total_score']
+                ))
+
+        return recommendations

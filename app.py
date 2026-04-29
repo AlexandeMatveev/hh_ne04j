@@ -2,11 +2,9 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 from datetime import datetime, timedelta
-import numpy as np
 import atexit
 import logging
 import asyncio
-from typing import Optional, Dict, Any, List
 
 # ==================== НАСТРОЙКИ ====================
 logging.basicConfig(level=logging.INFO)
@@ -65,7 +63,7 @@ def render_header():
 def init_services():
     """Инициализация всех сервисов"""
     try:
-        from config import settings
+        from api.config import settings
         from src.database.neo4j_client import Neo4jClient
         from src.ai.embeddings import EmbeddingService
         from src.services.user_service import UserService
@@ -425,7 +423,7 @@ def render_recommendations_page():
     user = st.session_state.current_user  # Добавляем переменную пользователя
 
     # Настройки
-    from config import settings
+    from api.config import settings
     col1, col2, col3 = st.columns(3)
     with col1:
         num_rec = st.slider("📊 Количество", 3, 20, 8)
@@ -647,7 +645,7 @@ def render_settings_page():
     col1, col2 = st.columns(2)
     with col1:
         st.markdown("### 🎯 Настройки рекомендаций")
-        from config import settings
+        from api.config import settings
 
         content_weight = st.slider("Вес контентной фильтрации", 0.0, 1.0, settings.content_weight, 0.05)
         graph_weight = st.slider("Вес графовой фильтрации", 0.0, 1.0, settings.graph_weight, 0.05)
