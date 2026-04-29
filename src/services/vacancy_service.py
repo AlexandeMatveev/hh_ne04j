@@ -1,286 +1,314 @@
+from typing import List, Optional, Dict, Any
+import uuid
+from datetime import datetime
 import logging
-import numpy as np
 from src.database.neo4j_client import Neo4jClient
-from src.database.models import Vacancy, RecommendationScore
 from src.ai.embeddings import EmbeddingService
-from config import settings
 
 logger = logging.getLogger(__name__)
 
 
 class VacancyService:
-    def __init__(self, neo4j_client, embedding_service):
-        self.db = neo4j_client
-        self.embedding_service = embedding_service
+    def __init__(
+            self,
+            neo4j_client: Neo4jClient,
+            embedding_service: EmbeddingService
+    ):
+        self.neo4j = neo4j_client
+        self.embeddings = embedding_service
 
-    def save_vacancy(self, vacancy):
-        """Сохранение вакансии с проверкой данных"""
-        if not vacancy or not vacancy.id:
-            logger.error("Attempted to save empty vacancy")
-            return False
-
-        # Проверяем обязательные поля
-        if not vacancy.title or not vacancy.description:
-            logger.warning(f"Vacancy {vacancy.id} missing title or description")
-
+    def save_vacancy(self, vacancy) -> bool:
+        """Сохранить вакансию (синхронно для Streamlit)"""
         try:
-            # Генерация эмбеддинга
-            if vacancy.description and not vacancy.embedding:
-                vacancy.embedding = self.embedding_service.get_embedding(
-                    f"{vacancy.title}. {vacancy.description}"
-                )
+            # Определяем hh_id (пытаемся получить из разных атрибутов)
+            hh_id = None
+            if hasattr(vacancy, 'hh_id'):
+                hh_id = vacancy.hh_id
+            elif hasattr(vacancy, 'id'):
+                hh_id = vacancy.id
+            elif hasattr(vacancy, 'external_id'):
+                hh_id = vacancy.external_id
+            elif isinstance(vacancy, dict):
+                hh_id = vacancy.get('hh_id') or vacancy.get('id') or vacancy.get('external_id')
 
-            # Подготавливаем данные
-            vacancy_dict = vacancy.to_dict()
-
-            # Проверяем типы данных для Neo4j
-            for key, value in vacancy_dict.items():
-                if value is None:
-                    vacancy_dict[key] = ""
-                elif isinstance(value, list):
-                    vacancy_dict[key] = [str(item) for item in value] if value else []
-
-            query = """
-            MERGE (v:Vacancy {id: $id})
-            SET v.title = $title,
-                v.description = $description,
-                v.salary_from = $salary_from,
-                v.salary_to = $salary_to,
-                v.currency = $currency,
-                v.experience = $experience,
-                v.employment = $employment,
-                v.published_at = $published_at,
-                v.embedding = $embedding,
-                v.external_id = $external_id,
-                v.company_name = $company_name,
-                v.location_name = $location_name,
-                v.skills = $skills
-            """
-
-            self.db.execute_query(query, vacancy_dict)
-
-            # Сохраняем навыки
-            if vacancy.skills:
-                for skill_name in vacancy.skills:
-                    if not skill_name or not isinstance(skill_name, str):
-                        continue
-
-                    skill_id = skill_name.lower().replace(' ', '_').replace('.', '')
-                    skill_query = """
-                    MERGE (s:Skill {id: $skill_id})
-                    SET s.name = $skill_name
-                    MERGE (v:Vacancy {id: $vacancy_id})-[:REQUIRES]->(s)
-                    """
-                    self.db.execute_query(skill_query, {
-                        'skill_id': skill_id,
-                        'skill_name': skill_name,
-                        'vacancy_id': vacancy.id
-                    })
-
-            # Сохраняем компанию
-            if vacancy.company_name:
-                company_id = vacancy.company_name.lower().replace(' ', '_').replace('.', '')
-                company_query = """
-                MERGE (c:Company {id: $company_id})
-                SET c.name = $company_name
-                MERGE (v:Vacancy {id: $vacancy_id})-[:FROM_COMPANY]->(c)
-                """
-                self.db.execute_query(company_query, {
-                    'company_id': company_id,
-                    'company_name': vacancy.company_name,
-                    'vacancy_id': vacancy.id
-                })
-
-            # Сохраняем локацию
-            if vacancy.location_name:
-                location_id = vacancy.location_name.lower().replace(' ', '_').replace('.', '')
-                location_query = """
-                MERGE (l:Location {id: $location_id})
-                SET l.name = $location_name
-                MERGE (v:Vacancy {id: $vacancy_id})-[:IN_LOCATION]->(l)
-                """
-                self.db.execute_query(location_query, {
-                    'location_id': location_id,
-                    'location_name': vacancy.location_name,
-                    'vacancy_id': vacancy.id
-                })
-
-            logger.info(f"Successfully saved vacancy: {vacancy.id}")
-            return True
-
-        except Exception as e:
-            logger.error(f"Error saving vacancy {vacancy.id}: {e}")
-            # Пробуем упрощенный вариант сохранения
-            try:
-                simple_query = """
-                MERGE (v:Vacancy {id: $id})
-                SET v.title = $title,
-                    v.description = $description
-                """
-                self.db.execute_query(simple_query, {
-                    'id': vacancy.id,
-                    'title': vacancy.title or "",
-                    'description': vacancy.description or ""
-                })
-                logger.info(f"Saved vacancy {vacancy.id} with minimal data")
-                return True
-            except Exception as e2:
-                logger.error(f"Failed even minimal save for {vacancy.id}: {e2}")
+            if not hh_id:
+                logger.error("Vacancy has no id")
                 return False
-    def get_recommendations(self, user_id, limit=10):
-        """Получение рекомендаций для пользователя"""
-        # 1. Контентная фильтрация
-        content_scores = self._get_content_recommendations(user_id)
 
-        # 2. Графовая фильтрация
-        graph_scores = self._get_graph_recommendations(user_id)
-
-        # 3. Семантическая фильтрация
-        semantic_scores = self._get_semantic_recommendations(user_id)
-
-        # Комбинируем
-        recommendations = self._combine_recommendations(
-            content_scores, graph_scores, semantic_scores, limit
-        )
-
-        return recommendations
-
-    def _get_content_recommendations(self, user_id):
-        """Контентная фильтрация на основе навыков"""
-        query = """
-        MATCH (u:User {id: $user_id})
-        WITH u.skills AS user_skills
-
-        MATCH (v:Vacancy)
-        WITH v, user_skills, v.skills AS vacancy_skills
-
-        // Считаем совпадения
-        WITH v, 
-             size([skill IN vacancy_skills WHERE skill IN user_skills]) AS matches,
-             size(vacancy_skills) AS total_skills
-
-        WHERE total_skills > 0
-        RETURN v.id AS vacancy_id, 
-               1.0 * matches / total_skills AS score
-        ORDER BY score DESC
-        LIMIT 100
-        """
-
-        results = self.db.execute_query(query, {'user_id': user_id})
-        return {r['vacancy_id']: r['score'] for r in results}
-
-    def _get_graph_recommendations(self, user_id):
-        """Графовая коллаборативная фильтрация"""
-        query = """
-        // Находим похожих пользователей
-        MATCH (u1:User {id: $user_id})-[:HAS_SKILL]->(s:Skill)<-[:HAS_SKILL]-(u2:User)
-        WHERE u1 <> u2
-
-        WITH u2, COUNT(DISTINCT s) AS common_skills
-
-        // Находим вакансии, которые нравятся похожим пользователям
-        MATCH (u2)-[:LIKED]->(v:Vacancy)
-        WHERE NOT EXISTS((:User {id: $user_id})-[:LIKED|DISLIKED]->(v))
-
-        WITH v, COUNT(DISTINCT u2) AS similar_users
-        RETURN v.id AS vacancy_id, 
-               similar_users AS score
-        ORDER BY score DESC
-        LIMIT 100
-        """
-
-        results = self.db.execute_query(query, {'user_id': user_id})
-        return {r['vacancy_id']: r['score'] for r in results}
-
-    def _get_semantic_recommendations(self, user_id):
-        """Семантические рекомендации"""
-        # Эмбеддинг пользователя
-        user_query = """
-        MATCH (u:User {id: $user_id})
-        RETURN u.embedding AS embedding
-        """
-
-        user_data = self.db.execute_query(user_query, {'user_id': user_id})
-        if not user_data or not user_data[0].get('embedding'):
-            return {}
-
-        user_embedding = user_data[0]['embedding']
-
-        # Эмбеддинги вакансий
-        vacancies_query = """
-        MATCH (v:Vacancy)
-        WHERE v.embedding IS NOT NULL
-        RETURN v.id AS vacancy_id, v.embedding AS vacancy_embedding
-        LIMIT 100
-        """
-
-        vacancies = self.db.execute_query(vacancies_query)
-        scores = {}
-
-        for vac in vacancies:
-            if vac['vacancy_embedding']:
-                similarity = self.embedding_service.get_similarity(
-                    user_embedding, vac['vacancy_embedding']
-                )
-                scores[vac['vacancy_id']] = max(0, similarity)
-
-        return scores
-
-    def _combine_recommendations(self, content_scores, graph_scores, semantic_scores, limit):
-        """Комбинирование рекомендаций"""
-        all_ids = set(content_scores.keys()) | set(graph_scores.keys()) | set(semantic_scores.keys())
-        recommendations = []
-
-        for vacancy_id in all_ids:
-            # Берем оценки
-            content_score = content_scores.get(vacancy_id, 0)
-            graph_score = graph_scores.get(vacancy_id, 0)
-            semantic_score = semantic_scores.get(vacancy_id, 0)
-
-            # Нормализация
-            max_content = max(content_scores.values()) if content_scores else 1
-            max_graph = max(graph_scores.values()) if graph_scores else 1
-            max_semantic = max(semantic_scores.values()) if semantic_scores else 1
-
-            if max_content > 0:
-                content_score /= max_content
-            if max_graph > 0:
-                graph_score /= max_graph
-            if max_semantic > 0:
-                semantic_score /= max_semantic
-
-            # Общий score (используем строчные атрибуты)
-            total_score = (
-                    settings.content_weight * content_score +
-                    settings.graph_weight * graph_score +
-                    settings.semantic_weight * semantic_score
+            # Проверяем существование
+            existing = self.neo4j.execute_query(
+                "MATCH (v:Vacancy {hh_id: $hh_id}) RETURN v",
+                {'hh_id': str(hh_id)}
             )
 
-            # Получаем вакансию
-            vacancy = self._get_vacancy_by_id(vacancy_id)
-            if vacancy:
-                recommendations.append(RecommendationScore(
-                    vacancy=vacancy,
-                    content_score=content_score,
-                    graph_score=graph_score,
-                    semantic_score=semantic_score,
-                    total_score=total_score
-                ))
+            if existing:
+                logger.info(f"Vacancy {hh_id} already exists")
+                return True
 
-        # Сортировка
-        recommendations.sort(key=lambda x: x.total_score, reverse=True)
-        return recommendations[:limit]
+            # Создаем словарь для сохранения
+            vacancy_dict = self._vacancy_to_dict(vacancy, hh_id)
 
-    def _get_vacancy_by_id(self, vacancy_id):
-        """Получение вакансии по ID"""
-        query = """
-        MATCH (v:Vacancy {id: $vacancy_id})
-        RETURN v
-        """
+            if not vacancy_dict:
+                logger.error(f"Failed to convert vacancy to dict: {hh_id}")
+                return False
 
-        results = self.db.execute_query(query, {'vacancy_id': vacancy_id})
-        if not results:
+            # Пробуем создать эмбеддинг
+            text_for_embedding = f"{vacancy_dict.get('title', '')} {vacancy_dict.get('description', '')}"
+            embedding = self._get_embedding_sync(text_for_embedding)
+            if embedding:
+                vacancy_dict['embedding'] = embedding
+
+            # Сохраняем в Neo4j
+            result = self.neo4j.execute_query("""
+                CREATE (v:Vacancy {
+                    id: $id,
+                    hh_id: $hh_id,
+                    title: $title,
+                    description: $description,
+                    company_name: $company_name,
+                    location_name: $location_name,
+                    salary_from: $salary_from,
+                    salary_to: $salary_to,
+                    salary_currency: $salary_currency,
+                    skills: $skills,
+                    experience: $experience,
+                    employment: $employment,
+                    schedule: $schedule,
+                    url: $url,
+                    published_at: datetime($published_at),
+                    embedding: $embedding
+                })
+                RETURN v.id
+            """, vacancy_dict)
+
+            if result:
+                logger.info(f"Saved vacancy {hh_id}")
+                return True
+            else:
+                logger.warning(f"Failed to save vacancy {hh_id}")
+                return False
+
+        except Exception as e:
+            logger.error(f"Error saving vacancy: {e}")
+            return self._save_vacancy_minimal(vacancy)
+
+    def _vacancy_to_dict(self, vacancy, hh_id: str = None) -> Dict[str, Any]:
+        """Преобразовать вакансию в словарь для Neo4j"""
+
+        # Получаем все атрибуты объекта
+        attrs = {}
+
+        # Пробуем получить атрибуты разными способами
+        if hasattr(vacancy, '__dict__'):
+            attrs = vacancy.__dict__.copy()
+        elif hasattr(vacancy, '__dataclass_fields__'):
+            # Для dataclass
+            for field in vacancy.__dataclass_fields__:
+                attrs[field] = getattr(vacancy, field, None)
+        elif isinstance(vacancy, dict):
+            attrs = vacancy.copy()
+        else:
+            try:
+                attrs = vars(vacancy).copy()
+            except:
+                pass
+
+        # Если не нашли hh_id, используем переданный
+        if not hh_id:
+            hh_id = attrs.get('hh_id') or attrs.get('id') or attrs.get('external_id')
+
+        if not hh_id:
+            logger.error("Cannot determine hh_id for vacancy")
             return None
 
-        vacancy_data = results[0]['v']
-        return Vacancy.from_dict(vacancy_data)
+        # Создаем словарь с ВСЕМИ необходимыми полями
+        result = {
+            'id': str(uuid.uuid4()),
+            'hh_id': str(hh_id),
+            'title': attrs.get('title', '')[:200],
+            'description': attrs.get('description', '')[:5000] if attrs.get('description') else '',
+            'company_name': attrs.get('company_name') or attrs.get('company', 'Не указана'),
+            'location_name': attrs.get('location_name') or attrs.get('location', 'Не указана'),
+            'salary_from': attrs.get('salary_from'),
+            'salary_to': attrs.get('salary_to'),
+            'salary_currency': attrs.get('salary_currency') or attrs.get('currency', 'RUB'),
+            'skills': attrs.get('skills', [])[:20],
+            'experience': attrs.get('experience', 'Не указан'),
+            'employment': attrs.get('employment', 'Не указан'),
+            'schedule': attrs.get('schedule', 'Не указан'),
+            'url': attrs.get('url', f"https://hh.ru/vacancy/{hh_id}"),
+            'published_at': self._format_date(attrs.get('published_at')),
+            'embedding': attrs.get('embedding')
+        }
+
+        # Очищаем None значения
+        for key, value in result.items():
+            if value is None and key not in ['embedding', 'salary_from', 'salary_to']:
+                if key == 'schedule':
+                    result[key] = 'Не указан'
+                elif key == 'url':
+                    result[key] = f"https://hh.ru/vacancy/{hh_id}"
+                elif key == 'company_name':
+                    result[key] = 'Не указана'
+                elif key == 'location_name':
+                    result[key] = 'Не указана'
+
+        logger.debug(f"Converted vacancy {hh_id} to dict with fields: {list(result.keys())}")
+        return result
+
+    def _format_date(self, date_value) -> str:
+        """Форматирование даты для Neo4j"""
+        if not date_value:
+            return datetime.now().isoformat()
+
+        if isinstance(date_value, datetime):
+            return date_value.isoformat()
+
+        if isinstance(date_value, str):
+            return date_value
+
+        return datetime.now().isoformat()
+
+    def _save_vacancy_minimal(self, vacancy) -> bool:
+        """Сохранить вакансию только с базовыми полями"""
+        try:
+            # Определяем hh_id
+            hh_id = None
+            if hasattr(vacancy, 'hh_id'):
+                hh_id = vacancy.hh_id
+            elif hasattr(vacancy, 'id'):
+                hh_id = vacancy.id
+            elif hasattr(vacancy, 'external_id'):
+                hh_id = vacancy.external_id
+            elif isinstance(vacancy, dict):
+                hh_id = vacancy.get('hh_id') or vacancy.get('id') or vacancy.get('external_id')
+
+            if not hh_id:
+                logger.error("Cannot determine hh_id for minimal save")
+                return False
+
+            # Получаем базовые атрибуты
+            title = ''
+            if hasattr(vacancy, 'title'):
+                title = vacancy.title[:200]
+            elif isinstance(vacancy, dict):
+                title = vacancy.get('title', '')[:200]
+
+            description = ''
+            if hasattr(vacancy, 'description'):
+                description = vacancy.description[:500] if vacancy.description else ''
+            elif isinstance(vacancy, dict):
+                description = vacancy.get('description', '')[:500]
+
+            company_name = 'Не указана'
+            if hasattr(vacancy, 'company_name'):
+                company_name = vacancy.company_name[:100] if vacancy.company_name else 'Не указана'
+            elif isinstance(vacancy, dict):
+                company_name = vacancy.get('company_name', 'Не указана')[:100]
+
+            location_name = 'Не указана'
+            if hasattr(vacancy, 'location_name'):
+                location_name = vacancy.location_name[:100] if vacancy.location_name else 'Не указана'
+            elif isinstance(vacancy, dict):
+                location_name = vacancy.get('location_name', 'Не указана')[:100]
+
+            # Зарплата
+            salary_from = None
+            salary_to = None
+            salary_currency = 'RUB'
+
+            if hasattr(vacancy, 'salary_from'):
+                salary_from = vacancy.salary_from
+                salary_to = vacancy.salary_to if hasattr(vacancy, 'salary_to') else None
+                salary_currency = vacancy.currency if hasattr(vacancy, 'currency') else 'RUB'
+            elif isinstance(vacancy, dict):
+                salary_from = vacancy.get('salary_from')
+                salary_to = vacancy.get('salary_to')
+                salary_currency = vacancy.get('currency', 'RUB')
+
+            # Навыки
+            skills = []
+            if hasattr(vacancy, 'skills'):
+                skills = vacancy.skills[:10] if vacancy.skills else []
+            elif isinstance(vacancy, dict):
+                skills = vacancy.get('skills', [])[:10]
+
+            # Опыт и занятость
+            experience = 'Не указан'
+            if hasattr(vacancy, 'experience'):
+                experience = vacancy.experience or 'Не указан'
+            elif isinstance(vacancy, dict):
+                experience = vacancy.get('experience', 'Не указан')
+
+            employment = 'Не указан'
+            if hasattr(vacancy, 'employment'):
+                employment = vacancy.employment or 'Не указан'
+            elif isinstance(vacancy, dict):
+                employment = vacancy.get('employment', 'Не указан')
+
+            # URL
+            url = f"https://hh.ru/vacancy/{hh_id}"
+            if hasattr(vacancy, 'url') and vacancy.url:
+                url = vacancy.url
+            elif isinstance(vacancy, dict) and vacancy.get('url'):
+                url = vacancy.get('url')
+
+            vacancy_dict = {
+                'id': str(uuid.uuid4()),
+                'hh_id': str(hh_id),
+                'title': title,
+                'description': description,
+                'company_name': company_name,
+                'location_name': location_name,
+                'salary_from': salary_from,
+                'salary_to': salary_to,
+                'salary_currency': salary_currency,
+                'skills': skills,
+                'experience': experience,
+                'employment': employment,
+                'schedule': 'Не указан',
+                'url': url,
+                'published_at': datetime.now().isoformat()
+            }
+
+            result = self.neo4j.execute_query("""
+                CREATE (v:Vacancy {
+                    id: $id,
+                    hh_id: $hh_id,
+                    title: $title,
+                    description: $description,
+                    company_name: $company_name,
+                    location_name: $location_name,
+                    salary_from: $salary_from,
+                    salary_to: $salary_to,
+                    salary_currency: $salary_currency,
+                    skills: $skills,
+                    experience: $experience,
+                    employment: $employment,
+                    schedule: $schedule,
+                    url: $url,
+                    published_at: datetime($published_at)
+                })
+                RETURN v.id
+            """, vacancy_dict)
+
+            if result:
+                logger.info(f"Saved vacancy {hh_id} with minimal data")
+                return True
+            return False
+
+        except Exception as e:
+            logger.error(f"Minimal save failed: {e}")
+            return False
+
+    def _get_embedding_sync(self, text: str) -> Optional[List[float]]:
+        """Синхронное получение эмбеддинга"""
+        if not text or len(text.strip()) < 10:
+            return None
+
+        try:
+            # Используем правильный метод get_embedding_sync
+            return self.embeddings.get_embedding_sync(text)
+        except Exception as e:
+            logger.warning(f"Could not generate embedding: {e}")
+            return None

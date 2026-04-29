@@ -13,3 +13,5 @@ pydantic
 mistralai
 beautifulsoup4
 aiohttp
+
+nest_asyncio
