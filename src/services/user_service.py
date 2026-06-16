@@ -11,31 +11,13 @@ class UserService:
     def __init__(self, neo4j_client: Neo4jClient):
         self.neo4j = neo4j_client
 
-    def create_user(self, user_id: str, name: str = None, email: str = None) -> bool:
-        """Создать пользователя"""
+    def _execute_user_query(self, query: str, params: Dict) -> bool:
+        """Выполнить запрос пользователя с обработкой ошибок"""
         try:
-            result = self.neo4j.execute_query("""
-                MERGE (u:User {id: $user_id})
-                SET u.username = $name,
-                    u.email = $email,
-                    u.created_at = datetime($created_at),
-                    u.updated_at = datetime($updated_at)
-                RETURN u
-            """, {
-                'user_id': user_id,
-                'name': name or f"User_{user_id[:8]}",
-                'email': email,
-                'created_at': datetime.now().isoformat(),
-                'updated_at': datetime.now().isoformat()
-            })
-
-            if result:
-                logger.info(f"User created/updated: {user_id}")
-                return True
-            return False
-
+            result = self.neo4j.execute_query(query, params)
+            return bool(result)
         except Exception as e:
-            logger.error(f"Error creating user {user_id}: {e}")
+            logger.error(f"Error executing user query: {e}")
             return False
 
     def create_or_update_user(self, user) -> bool:
@@ -46,7 +28,6 @@ class UserService:
             user: Объект User с атрибутами id, username, resume_text, skills
         """
         try:
-            # Создаём пользователя
             result = self.neo4j.execute_query("""
                 MERGE (u:User {id: $user_id})
                 SET u.username = $username,
@@ -62,23 +43,21 @@ class UserService:
                 'updated_at': datetime.now().isoformat()
             })
 
-            if result:
+            if result and hasattr(user, 'skills') and user.skills:
                 # Добавляем навыки как отдельные узлы
-                if hasattr(user, 'skills') and user.skills:
-                    for skill_name in user.skills:
-                        self.neo4j.execute_query("""
-                            MATCH (u:User {id: $user_id})
-                            MERGE (s:Skill {name: $skill_name})
-                            MERGE (u)-[:HAS_SKILL]->(s)
-                        """, {
-                            'user_id': user.id,
-                            'skill_name': skill_name
-                        })
+                for skill_name in user.skills:
+                    self.neo4j.execute_query("""
+                        MATCH (u:User {id: $user_id})
+                        MERGE (s:Skill {name: $skill_name})
+                        MERGE (u)-[:HAS_SKILL]->(s)
+                    """, {
+                        'user_id': user.id,
+                        'skill_name': skill_name
+                    })
 
+            if result:
                 logger.info(f"User created/updated: {user.username}")
-                return True
-            return False
-
+            return bool(result)
         except Exception as e:
             logger.error(f"Error creating/updating user {user.id}: {e}")
             return False
@@ -104,114 +83,57 @@ class UserService:
             if result and result[0].get('u'):
                 user_data = result[0]['u']
                 skills = result[0].get('skills', [])
-
                 from src.database.models import User
+                username = user_data.get('username', '') or user_data.get('name', '')
                 return User(
                     id=user_data.get('id'),
-                    username=user_data.get('username', ''),
+                    username=username,
                     resume_text=user_data.get('resume_text', ''),
                     skills=[s for s in skills if s is not None]
                 )
             return None
-
-        except Exception as e:
-            logger.error(f"Error getting user {user_id}: {e}")
-            return None
-
-    def get_user(self, user_id: str) -> Optional[Dict[str, Any]]:
-        """Получить пользователя как словарь"""
-        try:
-            result = self.neo4j.execute_query(
-                "MATCH (u:User {id: $user_id}) RETURN u",
-                {'user_id': user_id}
-            )
-
-            if result and result[0].get('u'):
-                user_data = result[0]['u']
-                return {
-                    'id': user_data.get('id'),
-                    'name': user_data.get('name'),
-                    'username': user_data.get('username'),
-                    'email': user_data.get('email'),
-                    'resume_text': user_data.get('resume_text'),
-                    'skills': user_data.get('skills', []),
-                    'created_at': user_data.get('created_at'),
-                    'updated_at': user_data.get('updated_at')
-                }
-            return None
-
         except Exception as e:
             logger.error(f"Error getting user {user_id}: {e}")
             return None
 
     def record_view(self, user_id: str, vacancy_id: str) -> bool:
         """Записать просмотр вакансии"""
-        try:
-            result = self.neo4j.execute_query("""
-                MATCH (u:User {id: $user_id})
-                MATCH (v:Vacancy {id: $vacancy_id})
-                MERGE (u)-[r:VIEWED]->(v)
-                SET r.viewed_at = datetime($viewed_at)
-                RETURN r
-            """, {
-                'user_id': user_id,
-                'vacancy_id': vacancy_id,
-                'viewed_at': datetime.now().isoformat()
-            })
-
-            if result:
-                logger.info(f"Recorded view: user {user_id} -> vacancy {vacancy_id}")
-                return True
-            return False
-
-        except Exception as e:
-            logger.error(f"Error recording view: {e}")
-            return False
+        return self._execute_user_query("""
+            MATCH (u:User {id: $user_id})
+            MATCH (v:Vacancy {id: $vacancy_id})
+            MERGE (u)-[r:VIEWED]->(v)
+            SET r.viewed_at = datetime($viewed_at)
+            RETURN r
+        """, {
+            'user_id': user_id,
+            'vacancy_id': vacancy_id,
+            'viewed_at': datetime.now().isoformat()
+        })
 
     def add_favorite(self, user_id: str, vacancy_id: str) -> bool:
         """Добавить в избранное"""
-        try:
-            result = self.neo4j.execute_query("""
-                MATCH (u:User {id: $user_id})
-                MATCH (v:Vacancy {id: $vacancy_id})
-                MERGE (u)-[r:FAVORITED]->(v)
-                SET r.added_at = datetime($added_at)
-                RETURN r
-            """, {
-                'user_id': user_id,
-                'vacancy_id': vacancy_id,
-                'added_at': datetime.now().isoformat()
-            })
-
-            if result:
-                logger.info(f"Added favorite: user {user_id} -> vacancy {vacancy_id}")
-                return True
-            return False
-
-        except Exception as e:
-            logger.error(f"Error adding favorite: {e}")
-            return False
+        return self._execute_user_query("""
+            MATCH (u:User {id: $user_id})
+            MATCH (v:Vacancy {id: $vacancy_id})
+            MERGE (u)-[r:FAVORITED]->(v)
+            SET r.added_at = datetime($added_at)
+            RETURN r
+        """, {
+            'user_id': user_id,
+            'vacancy_id': vacancy_id,
+            'added_at': datetime.now().isoformat()
+        })
 
     def remove_favorite(self, user_id: str, vacancy_id: str) -> bool:
         """Удалить из избранного"""
-        try:
-            result = self.neo4j.execute_query("""
-                MATCH (u:User {id: $user_id})-[r:FAVORITED]->(v:Vacancy {id: $vacancy_id})
-                DELETE r
-                RETURN COUNT(r) as deleted
-            """, {
-                'user_id': user_id,
-                'vacancy_id': vacancy_id
-            })
-
-            if result and result[0].get('deleted', 0) > 0:
-                logger.info(f"Removed favorite: user {user_id} -> vacancy {vacancy_id}")
-                return True
-            return False
-
-        except Exception as e:
-            logger.error(f"Error removing favorite: {e}")
-            return False
+        return self._execute_user_query("""
+            MATCH (u:User {id: $user_id})-[r:FAVORITED]->(v:Vacancy {id: $vacancy_id})
+            DELETE r
+            RETURN COUNT(r) as deleted
+        """, {
+            'user_id': user_id,
+            'vacancy_id': vacancy_id
+        })
 
     def get_user_history(self, user_id: str, limit: int = 50) -> List[Dict[str, Any]]:
         """Получить историю пользователя"""
@@ -233,9 +155,37 @@ class UserService:
                 ORDER BY viewed_at DESC
                 LIMIT $limit
             """, {'user_id': user_id, 'limit': limit})
-
             return history or []
-
         except Exception as e:
             logger.error(f"Error getting user history: {e}")
             return []
+
+
+# === backward compatibility (для совместимости) ===
+
+def create_user(self, user_id: str, name: str = None, email: str = None) -> bool:
+    """Создать пользователя (устаревший метод)"""
+    try:
+        result = self.neo4j.execute_query("""
+            MERGE (u:User {id: $user_id})
+            SET u.username = $name,
+                u.email = $email,
+                u.created_at = datetime($created_at),
+                u.updated_at = datetime($updated_at)
+            RETURN u
+        """, {
+            'user_id': user_id,
+            'name': name or f"User_{user_id[:8]}",
+            'email': email,
+            'created_at': datetime.now().isoformat(),
+            'updated_at': datetime.now().isoformat()
+        })
+        if result:
+            logger.info(f"User created/updated: {user_id}")
+        return bool(result)
+    except Exception as e:
+        logger.error(f"Error creating user {user_id}: {e}")
+        return False
+
+
+UserService.create_user = create_user

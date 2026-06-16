@@ -73,8 +73,9 @@ class Neo4jClient:
             logger.info("Async Neo4j connection closed")
 
     def initialize_database(self):
-        """Инициализация базы данных (создание индексов)"""
-        queries = [
+        """Инициализация базы данных (создание индексов и схемы связей)"""
+        # Индексы для узлов
+        node_indexes = [
             "CREATE INDEX IF NOT EXISTS FOR (u:User) ON (u.id)",
             "CREATE INDEX IF NOT EXISTS FOR (v:Vacancy) ON (v.id)",
             "CREATE INDEX IF NOT EXISTS FOR (s:Skill) ON (s.name)",
@@ -82,12 +83,42 @@ class Neo4jClient:
             "CREATE INDEX IF NOT EXISTS FOR (l:Location) ON (l.name)",
         ]
 
-        for query in queries:
+        for query in node_indexes:
             try:
                 self.execute_query(query)
                 logger.info(f"Index created: {query[:50]}...")
             except Exception as e:
                 logger.warning(f"Could not create index: {e}")
+
+        # Создание тестовой связи для инициализации типов отношений
+        # (Neo4j создает типы отношений автоматически при первом использовании)
+        try:
+            # Сначала создаем тестовые узлы, если их нет
+            self.execute_query(
+                "MERGE (u:User {id: 'init'}) "
+                "MERGE (v:Vacancy {id: 'init'}) "
+                "MERGE (u)-[:VIEWED]->(v) "
+                "MERGE (u)-[:RATED {rating: 3, created_at: datetime()}]->(v) "
+                "MERGE (u)-[:FAVORITED]->(v) "
+                "MERGE (u)-[:HAS_SKILL]->(s:Skill {name: 'test'})"
+            )
+            logger.info("Relationship types initialized")
+        except Exception as e:
+            logger.debug(f"Relationship init skipped: {e}")
+
+        # Индексы для свойств связей
+        relationship_indexes = [
+            "CREATE INDEX IF NOT EXISTS FOR (u:User)-[r:VIEWED]->(v:Vacancy) ON (r.created_at)",
+            "CREATE INDEX IF NOT EXISTS FOR (u:User)-[r:RATED]->(v:Vacancy) ON (r.rating)",
+            "CREATE INDEX IF NOT EXISTS FOR (u:User)-[r:RATED]->(v:Vacancy) ON (r.created_at)",
+        ]
+
+        for query in relationship_indexes:
+            try:
+                self.execute_query(query)
+                logger.info(f"Relationship index created: {query[:50]}...")
+            except Exception as e:
+                logger.warning(f"Could not create relationship index: {e}")
 
         logger.info("Database initialized")
 

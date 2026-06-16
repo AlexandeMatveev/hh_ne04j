@@ -114,6 +114,7 @@ def init_services():
 
         logger.info("💬 Создание FeedbackService...")
         feedback_service = FeedbackService(neo4j_client)  # ← 1 аргумент
+        feedback_service.init(neo4j_client)  # ← Инициализируем!
 
         logger.info("🤖 Создание HH Parser...")
         parser = HHParser()  # ← 0 аргументов
@@ -287,10 +288,14 @@ def filter_vacancies(vacancies, min_salary, show_only_new):
 def update_feedback_history():
     """Обновление истории обратной связи"""
     if services and st.session_state.current_user:
-        history = services['feedback_service'].get_user_feedback_history(
-            st.session_state.current_user.id, 20
-        )
-        st.session_state.feedback_history = history if history else []
+        try:
+            history = services['feedback_service'].get_user_feedback_history(
+                st.session_state.current_user.id, 20
+            )
+            st.session_state.feedback_history = history if history else []
+        except Exception as e:
+            logger.error(f"Error updating feedback history: {e}")
+            st.session_state.feedback_history = []
 
 
 @st.cache_data(ttl=300)
@@ -314,6 +319,46 @@ def get_system_stats():
 def render_profile_page():
     """Страница управления профилем"""
     st.markdown('<h2 class="sub-header">👤 Управление профилем</h2>', unsafe_allow_html=True)
+
+    # Функция для редактирования профиля
+    def render_edit_form(user):
+        """Форма редактирования профиля"""
+        with st.expander("✏️ Редактировать профиль", expanded=False):
+            with st.form("edit_user_form"):
+                username = st.text_input("Имя пользователя", value=user.username)
+                skills_input = st.text_area(
+                    "Навыки через запятую",
+                    value=", ".join(user.skills) if hasattr(user, 'skills') and user.skills else ""
+                )
+                resume_text = st.text_area(
+                    "Резюме",
+                    value=user.resume_text if hasattr(user, 'resume_text') else ""
+                )
+
+                if st.form_submit_button("💾 Сохранить изменения", type="primary"):
+                    if not username or not skills_input or not resume_text:
+                        st.error("⚠️ Заполните все обязательные поля")
+                    else:
+                        try:
+                            skills = [s.strip() for s in skills_input.split(',') if s.strip()]
+                            
+                            # Создаем обновленный объект пользователя
+                            updated_user = type(user)(
+                                id=user.id,
+                                username=username,
+                                resume_text=resume_text,
+                                skills=skills
+                            )
+                            
+                            if services['user_service'].create_or_update_user(updated_user):
+                                st.session_state.current_user = updated_user
+                                st.success("✅ Профиль успешно обновлен!")
+                                update_feedback_history()
+                                st.rerun()
+                            else:
+                                st.error("❌ Не удалось обновить профиль")
+                        except Exception as e:
+                            st.error(f"❌ Ошибка при обновлении профиля: {e}")
 
     if not services:
         st.error("❌ Сервисы не инициализированы")
@@ -405,6 +450,10 @@ def render_profile_page():
         st.markdown("---")
         st.markdown('<h2 class="sub-header">📋 Текущий профиль</h2>', unsafe_allow_html=True)
 
+        # Кнопка редактирования
+        if hasattr(user, 'id') and user.id:
+            render_edit_form(user)
+
         col_info, col_stats = st.columns([2, 1])
         with col_info:
             st.markdown(f"### {user.username}")
@@ -473,13 +522,6 @@ def render_search_page():
 
                         if saved_count > 0:
                             st.info(f"💾 Сохранено {saved_count} вакансий в базу данных")
-                        saved_count = 0
-                        for vac in detailed_vacancies:
-                            if services['vacancy_service'].save_vacancy(vac):
-                                saved_count += 1
-
-                        if saved_count > 0:
-                            st.info(f"💾 Сохранено {saved_count} вакансий в базу данных")
 
                 except Exception as e:
                     st.error(f"❌ Ошибка поиска: {e}")
@@ -530,9 +572,21 @@ def render_recommendations_page():
 
     # Получение рекомендаций
     if st.button("🚀 Получить рекомендации", type="primary", use_container_width=True):
+        # Проверка на наличие навыков у пользователя
+        if not hasattr(user, 'skills') or not user.skills:
+            st.warning("⚠️ У пользователя нет навыков. Добавьте навыки в профиле для получения рекомендаций.")
+            return
+            
         with st.spinner("🧠 Анализируем предпочтения..."):
             try:
-                recommendations = services['vacancy_service'].get_recommendations(user.id, num_rec)
+                recommendations = services['vacancy_service'].get_recommendations(
+                    user.id, num_rec,
+                    content_weight=content_weight,
+                    semantic_weight=semantic_weight
+                )
+                # Обработка None от get_recommendations
+                if recommendations is None:
+                    recommendations = []
                 st.session_state.recommendations = recommendations if recommendations else []
 
                 if st.session_state.recommendations:
@@ -574,12 +628,12 @@ def render_analytics_page():
 
     try:
         stats = services['neo4j'].execute_query("""
-        MATCH (u:User {id: $user_id})-[r]->(:Vacancy)
+        MATCH (u:User {id: $user_id})-[r:VIEWED|RATED]->(:Vacancy)
         RETURN 
-            COUNT(CASE WHEN type(r) = 'LIKED' THEN 1 END) AS likes,
-            COUNT(CASE WHEN type(r) = 'DISLIKED' THEN 1 END) AS dislikes,
+            COUNT(CASE WHEN type(r) = 'RATED' AND r.rating >= 4 THEN 1 END) AS likes,
+            COUNT(CASE WHEN type(r) = 'RATED' AND r.rating <= 2 THEN 1 END) AS dislikes,
             COUNT(CASE WHEN type(r) = 'VIEWED' THEN 1 END) AS views,
-            COUNT(CASE WHEN type(r) = 'APPLIED' THEN 1 END) AS applies
+            COUNT(CASE WHEN type(r) = 'RATED' THEN 1 END) AS applies
         """, {'user_id': st.session_state.current_user.id})
 
         if stats:
