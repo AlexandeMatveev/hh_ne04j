@@ -16,7 +16,7 @@ class UserService:
         try:
             result = self.neo4j.execute_query("""
                 MERGE (u:User {id: $user_id})
-                SET u.name = $name,
+                SET u.username = $name,
                     u.email = $email,
                     u.created_at = datetime($created_at),
                     u.updated_at = datetime($updated_at)
@@ -38,8 +38,88 @@ class UserService:
             logger.error(f"Error creating user {user_id}: {e}")
             return False
 
+    def create_or_update_user(self, user) -> bool:
+        """
+        Создать или обновить пользователя из объекта User
+
+        Args:
+            user: Объект User с атрибутами id, username, resume_text, skills
+        """
+        try:
+            # Создаём пользователя
+            result = self.neo4j.execute_query("""
+                MERGE (u:User {id: $user_id})
+                SET u.username = $username,
+                    u.resume_text = $resume_text,
+                    u.skills = $skills,
+                    u.updated_at = datetime($updated_at)
+                RETURN u
+            """, {
+                'user_id': user.id,
+                'username': user.username,
+                'resume_text': getattr(user, 'resume_text', ''),
+                'skills': getattr(user, 'skills', []),
+                'updated_at': datetime.now().isoformat()
+            })
+
+            if result:
+                # Добавляем навыки как отдельные узлы
+                if hasattr(user, 'skills') and user.skills:
+                    for skill_name in user.skills:
+                        self.neo4j.execute_query("""
+                            MATCH (u:User {id: $user_id})
+                            MERGE (s:Skill {name: $skill_name})
+                            MERGE (u)-[:HAS_SKILL]->(s)
+                        """, {
+                            'user_id': user.id,
+                            'skill_name': skill_name
+                        })
+
+                logger.info(f"User created/updated: {user.username}")
+                return True
+            return False
+
+        except Exception as e:
+            logger.error(f"Error creating/updating user {user.id}: {e}")
+            return False
+
+    def get_user_by_id(self, user_id: str):
+        """
+        Получить пользователя по ID и вернуть объект User
+
+        Args:
+            user_id: ID пользователя
+
+        Returns:
+            Объект User или None
+        """
+        try:
+            result = self.neo4j.execute_query(
+                """MATCH (u:User {id: $user_id})
+                   OPTIONAL MATCH (u)-[:HAS_SKILL]->(s:Skill)
+                   RETURN u, COLLECT(s.name) as skills""",
+                {'user_id': user_id}
+            )
+
+            if result and result[0].get('u'):
+                user_data = result[0]['u']
+                skills = result[0].get('skills', [])
+
+                from src.database.models import User
+                return User(
+                    id=user_data.get('id'),
+                    username=user_data.get('username', ''),
+                    resume_text=user_data.get('resume_text', ''),
+                    skills=[s for s in skills if s is not None]
+                )
+            return None
+
+        except Exception as e:
+            logger.error(f"Error getting user {user_id}: {e}")
+            return None
+
     def get_user(self, user_id: str) -> Optional[Dict[str, Any]]:
-        """Получить пользователя"""
+        """Получить пользователя как словарь"""
         try:
             result = self.neo4j.execute_query(
                 "MATCH (u:User {id: $user_id}) RETURN u",
@@ -51,7 +131,10 @@ class UserService:
                 return {
                     'id': user_data.get('id'),
                     'name': user_data.get('name'),
+                    'username': user_data.get('username'),
                     'email': user_data.get('email'),
+                    'resume_text': user_data.get('resume_text'),
+                    'skills': user_data.get('skills', []),
                     'created_at': user_data.get('created_at'),
                     'updated_at': user_data.get('updated_at')
                 }

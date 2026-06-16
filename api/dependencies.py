@@ -68,3 +68,8 @@ def get_hh_parser():
     if _hh_parser is None:
         _hh_parser = HHParser()
     return _hh_parser
+
+
+
+
+                                   # 1 аргумент  → __init__(self)

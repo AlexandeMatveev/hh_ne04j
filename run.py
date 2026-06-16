@@ -20,13 +20,13 @@ def run_fastapi():
 def run_streamlit():
     """Запуск Streamlit приложения"""
     time.sleep(2)  # Ждем FastAPI
-    os.system("streamlit run app.py --server.port 8501")
+    os.system("streamlit run app.py --server.port 8502")
 
 
 def open_browser():
     """Открыть браузер с интерфейсом"""
     time.sleep(3)
-    webbrowser.open("http://localhost:8501")
+    webbrowser.open("http://localhost:8502")
 
 
 if __name__ == "__main__":
@@ -35,7 +35,7 @@ if __name__ == "__main__":
     print("=" * 60)
     print("📡 FastAPI API: http://localhost:8000")
     print("📄 API Docs: http://localhost:8000/docs")
-    print("🎨 Streamlit UI: http://localhost:8501")
+    print("🎨 Streamlit UI: http://localhost:8502")
     print("=" * 60)
 
     # Запуск в отдельных потоках
