@@ -100,6 +100,8 @@ class Neo4jClient:
                 "MERGE (u)-[:VIEWED]->(v) "
                 "MERGE (u)-[:RATED {rating: 3, created_at: datetime()}]->(v) "
                 "MERGE (u)-[:FAVORITED]->(v) "
+                "MERGE (u)-[:LIKED {created_at: datetime()}]->(v) "
+                "MERGE (u)-[:DISLIKED {created_at: datetime()}]->(v) "
                 "MERGE (u)-[:HAS_SKILL]->(s:Skill {name: 'test'})"
             )
             logger.info("Relationship types initialized")
@@ -111,6 +113,8 @@ class Neo4jClient:
             "CREATE INDEX IF NOT EXISTS FOR (u:User)-[r:VIEWED]->(v:Vacancy) ON (r.created_at)",
             "CREATE INDEX IF NOT EXISTS FOR (u:User)-[r:RATED]->(v:Vacancy) ON (r.rating)",
             "CREATE INDEX IF NOT EXISTS FOR (u:User)-[r:RATED]->(v:Vacancy) ON (r.created_at)",
+            "CREATE INDEX IF NOT EXISTS FOR (u:User)-[r:LIKED]->(v:Vacancy) ON (r.created_at)",
+            "CREATE INDEX IF NOT EXISTS FOR (u:User)-[r:DISLIKED]->(v:Vacancy) ON (r.created_at)",
         ]
 
         for query in relationship_indexes:

@@ -210,7 +210,7 @@ def render_vacancy_card(vacancy, user, context="search"):
 
     # Кнопки обратной связи
     st.markdown("---")
-    col_like, col_dislike, col_view, col_apply = st.columns(4)
+    col_like, col_dislike, col_favorite, col_view, col_apply = st.columns(5)
 
     vacancy_id = getattr(vacancy, 'id', None)
     user_id = getattr(user, 'id', None)
@@ -230,6 +230,13 @@ def render_vacancy_card(vacancy, user, context="search"):
                 feedback = UserFeedback(user_id=user_id, vacancy_id=vacancy_id, feedback_type=FeedbackType.DISLIKE)
                 if services and services['feedback_service'].record_feedback(feedback):
                     st.success("✅ Учтено!")
+                    st.rerun()
+
+        with col_favorite:
+            if st.button("⭐ Избранное", key=f"{context}_favorite_{vacancy_id}", use_container_width=True):
+                feedback = UserFeedback(user_id=user_id, vacancy_id=vacancy_id, feedback_type=FeedbackType.FAVORITE)
+                if services and services['feedback_service'].record_feedback(feedback):
+                    st.success("✅ Добавлено в избранное!")
                     st.rerun()
 
         with col_view:
@@ -628,10 +635,10 @@ def render_analytics_page():
 
     try:
         stats = services['neo4j'].execute_query("""
-        MATCH (u:User {id: $user_id})-[r:VIEWED|RATED]->(:Vacancy)
+        MATCH (u:User {id: $user_id})-[r:VIEWED|LIKED|DISLIKED|RATED]->(:Vacancy)
         RETURN 
-            COUNT(CASE WHEN type(r) = 'RATED' AND r.rating >= 4 THEN 1 END) AS likes,
-            COUNT(CASE WHEN type(r) = 'RATED' AND r.rating <= 2 THEN 1 END) AS dislikes,
+            COUNT(CASE WHEN type(r) = 'LIKED' OR r.rating >= 4 THEN 1 END) AS likes,
+            COUNT(CASE WHEN type(r) = 'DISLIKED' OR r.rating <= 2 THEN 1 END) AS dislikes,
             COUNT(CASE WHEN type(r) = 'VIEWED' THEN 1 END) AS views,
             COUNT(CASE WHEN type(r) = 'RATED' THEN 1 END) AS applies
         """, {'user_id': st.session_state.current_user.id})
@@ -648,6 +655,15 @@ def render_analytics_page():
             for col, (label, value) in zip(cols, metrics):
                 with col:
                     st.metric(label, value)
+        
+        # Показываем избранное
+        if services:
+            favorites = services['feedback_service'].get_user_likes(st.session_state.current_user.id, 5)
+            if favorites:
+                st.markdown("### ⭐ Избранное (последние 5)")
+                for fav in favorites:
+                    st.info(f"🔹 {fav.get('title', 'Без названия')} ({fav.get('company_name', 'Без названия')})")
+                    
     except Exception as e:
         logger.warning(f"Ошибка статистики пользователя: {e}")
 

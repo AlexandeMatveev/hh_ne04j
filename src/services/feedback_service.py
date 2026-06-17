@@ -10,15 +10,9 @@ logger = logging.getLogger(__name__)
 class FeedbackService:
     """
     Сервис обратной связи
-
-    ПРАВИЛЬНАЯ ВЕРСИЯ: __init__ с опциональным аргументом
     """
 
     def __init__(self, neo4j_client=None):
-        """
-        Args:
-            neo4j_client: Клиент Neo4j (опционально, можно передать в init())
-        """
         self.neo4j = neo4j_client
         self._initialized = False
 
@@ -48,8 +42,6 @@ class FeedbackService:
             logger.error(f"Error executing feedback query: {e}")
             return False
 
-    # === Базовые операции ===
-
     def add_feedback(self, user_id: str, vacancy_id: str, rating: int, comment: str = None) -> bool:
         """Добавить обратную связь"""
         return self._execute_feedback_query("""
@@ -75,13 +67,35 @@ class FeedbackService:
             {'user_id': user_id, 'vacancy_id': vacancy_id}
         )
 
-    def add_like(self, user_id: str, vacancy_id: str) -> bool:
-        """Добавить лайк (rating=1)"""
-        return self.add_feedback(user_id, vacancy_id, rating=1)
-
     def add_dislike(self, user_id: str, vacancy_id: str) -> bool:
-        """Добавить дизлайк (rating=0)"""
-        return self.add_feedback(user_id, vacancy_id, rating=0)
+        """Добавить дизлайк (rating=1) и создать прямую связь DISLIKED"""
+        self._check_initialized()
+        try:
+            result = self.add_feedback(user_id, vacancy_id, rating=1)
+            self.neo4j.execute_query(
+                "MATCH (u:User {id: $user_id}) MATCH (v:Vacancy {id: $vacancy_id}) "
+                "MERGE (u)-[r:DISLIKED]->(v) SET r.created_at = datetime() RETURN r",
+                {'user_id': user_id, 'vacancy_id': vacancy_id}
+            )
+            return result
+        except Exception as e:
+            logger.error(f"Error adding dislike: {e}")
+            return False
+
+    def add_like(self, user_id: str, vacancy_id: str) -> bool:
+        """Добавить лайк (rating=5) и создать прямую связь LIKED"""
+        self._check_initialized()
+        try:
+            result = self.add_feedback(user_id, vacancy_id, rating=5)
+            self.neo4j.execute_query(
+                "MATCH (u:User {id: $user_id}) MATCH (v:Vacancy {id: $vacancy_id}) "
+                "MERGE (u)-[r:LIKED]->(v) SET r.created_at = datetime() RETURN r",
+                {'user_id': user_id, 'vacancy_id': vacancy_id}
+            )
+            return result
+        except Exception as e:
+            logger.error(f"Error adding like: {e}")
+            return False
 
     def record_apply(self, user_id: str, vacancy_id: str) -> bool:
         """Записать отклик (как оценку 5)"""
@@ -106,7 +120,6 @@ class FeedbackService:
                 logger.warning(f"Invalid feedback object: {feedback}")
                 return False
             
-            # Маппинг типов на методы
             type_mapping = {
                 (FeedbackType.LIKE, 'LIKED'): lambda: self.add_like(user_id, vacancy_id),
                 (FeedbackType.DISLIKE, 'DISLIKED'): lambda: self.add_dislike(user_id, vacancy_id),
@@ -123,19 +136,19 @@ class FeedbackService:
             logger.error(f"Error recording feedback: {e}")
             return False
 
-    # === Аналитика ===
-
     def get_vacancy_rating(self, vacancy_id: str) -> Dict[str, Any]:
         """Получить средний рейтинг вакансии"""
         self._check_initialized()
         try:
             result = self.neo4j.execute_query("""
-                MATCH (v:Vacancy {id: $vacancy_id})<-[r:RATED]-(:User)
+                MATCH (v:Vacancy {id: $vacancy_id})<-[r:LIKED|DISLIKED|RATED]-(:User)
                 RETURN 
-                    AVG(r.rating) as average_rating,
-                    COUNT(r) as ratings_count,
-                    MIN(r.rating) as min_rating,
-                    MAX(r.rating) as max_rating
+                    AVG(CASE WHEN type(r) = 'LIKED' OR r.rating >= 4 THEN 5 
+                             WHEN type(r) = 'DISLIKED' OR r.rating <= 2 THEN 1 
+                             ELSE r.rating END) as average_rating,
+                    SUM(CASE WHEN type(r) = 'LIKED' OR r.rating >= 4 THEN 1 ELSE 0 END) as likes,
+                    SUM(CASE WHEN type(r) = 'DISLIKED' OR r.rating <= 2 THEN 1 ELSE 0 END) as dislikes,
+                    COUNT(r) as ratings_count
             """, {'vacancy_id': vacancy_id})
             return result[0] if result else {'average_rating': 0, 'ratings_count': 0}
         except Exception as e:
@@ -147,7 +160,7 @@ class FeedbackService:
         self._check_initialized()
         try:
             result = self.neo4j.execute_query("""
-                MATCH (u:User {id: $user_id})-[r:RATED]->(v:Vacancy)
+                MATCH (u:User {id: $user_id})-[r:LIKED|DISLIKED|RATED]->(v:Vacancy)
                 RETURN v.id as vacancy_id,
                        v.title as title,
                        r.rating as rating,
@@ -166,12 +179,12 @@ class FeedbackService:
         self._check_initialized()
         try:
             result = self.neo4j.execute_query("""
-                MATCH (u:User {id: $user_id})-[r:RATED]->(:Vacancy)
+                MATCH (u:User {id: $user_id})-[r:LIKED|DISLIKED|RATED]->(:Vacancy)
                 RETURN 
                     COUNT(r) as total_ratings,
-                    AVG(r.rating) as avg_rating,
-                    SUM(CASE WHEN r.rating >= 4 THEN 1 ELSE 0 END) as likes,
-                    SUM(CASE WHEN r.rating <= 2 THEN 1 ELSE 0 END) as dislikes
+                    AVG(CASE WHEN type(r) = 'LIKED' OR r.rating >= 4 THEN 1 ELSE 0 END) as like_rate,
+                    SUM(CASE WHEN type(r) = 'LIKED' OR r.rating >= 4 THEN 1 ELSE 0 END) as likes,
+                    SUM(CASE WHEN type(r) = 'DISLIKED' OR r.rating <= 2 THEN 1 ELSE 0 END) as dislikes
             """, {'user_id': user_id})
             return result[0] if result else {}
         except Exception as e:
@@ -183,9 +196,11 @@ class FeedbackService:
         self._check_initialized()
         try:
             result = self.neo4j.execute_query(
-                "MATCH (u:User {id: $user_id})-[r:VIEWED|RATED]->(v:Vacancy) "
+                "MATCH (u:User {id: $user_id})-[r:VIEWED|LIKED|DISLIKED|RATED]->(v:Vacancy) "
                 "RETURN v.id as vacancy_id, v.title as vacancy_title, "
                 "CASE WHEN type(r) = 'VIEWED' THEN 'VIEWED' "
+                "     WHEN type(r) = 'LIKED' THEN 'LIKED' "
+                "     WHEN type(r) = 'DISLIKED' THEN 'DISLIKED' "
                 "     WHEN r.rating >= 4 THEN 'LIKED' "
                 "     ELSE 'DISLIKED' "
                 "END as feedback_type, "
@@ -197,3 +212,66 @@ class FeedbackService:
         except Exception as e:
             logger.error(f"Error getting feedback history: {e}")
             return []
+
+    def get_user_likes(self, user_id: str, limit: int = 20) -> List[Dict]:
+        """Получить список понравившихся вакансий"""
+        self._check_initialized()
+        try:
+            result = self.neo4j.execute_query(
+                "MATCH (u:User {id: $user_id})-[r:LIKED]->(v:Vacancy) "
+                "RETURN v.id as vacancy_id, v.title as title, v.company_name as company_name, "
+                "v.salary_from as salary_from, v.salary_to as salary_to, v.skills as skills, "
+                "r.created_at as liked_at "
+                "ORDER BY r.created_at DESC LIMIT $limit",
+                {'user_id': user_id, 'limit': limit}
+            )
+            return result if result else []
+        except Exception as e:
+            logger.error(f"Error getting user likes: {e}")
+            return []
+
+    def get_user_dislikes(self, user_id: str, limit: int = 20) -> List[Dict]:
+        """Получить список непонравившихся вакансий"""
+        self._check_initialized()
+        try:
+            result = self.neo4j.execute_query(
+                "MATCH (u:User {id: $user_id})-[r:DISLIKED]->(v:Vacancy) "
+                "RETURN v.id as vacancy_id, v.title as title, v.company_name as company_name, "
+                "r.created_at as disliked_at "
+                "ORDER BY r.created_at DESC LIMIT $limit",
+                {'user_id': user_id, 'limit': limit}
+            )
+            return result if result else []
+        except Exception as e:
+            logger.error(f"Error getting user dislikes: {e}")
+            return []
+
+    def remove_like(self, user_id: str, vacancy_id: str) -> bool:
+        """Удалить лайк"""
+        self._check_initialized()
+        try:
+            result = self.neo4j.execute_query(
+                "MATCH (u:User {id: $user_id})-[r:LIKED]->(v:Vacancy {id: $vacancy_id}) "
+                "DELETE r "
+                "RETURN COUNT(r) as deleted",
+                {'user_id': user_id, 'vacancy_id': vacancy_id}
+            )
+            return result and result[0].get('deleted', 0) > 0
+        except Exception as e:
+            logger.error(f"Error removing like: {e}")
+            return False
+
+    def remove_dislike(self, user_id: str, vacancy_id: str) -> bool:
+        """Удалить дизлайк"""
+        self._check_initialized()
+        try:
+            result = self.neo4j.execute_query(
+                "MATCH (u:User {id: $user_id})-[r:DISLIKED]->(v:Vacancy {id: $vacancy_id}) "
+                "DELETE r "
+                "RETURN COUNT(r) as deleted",
+                {'user_id': user_id, 'vacancy_id': vacancy_id}
+            )
+            return result and result[0].get('deleted', 0) > 0
+        except Exception as e:
+            logger.error(f"Error removing dislike: {e}")
+            return False

@@ -267,17 +267,24 @@ class VacancyService:
         
         // Graph score (по компании - если пользователь работал в такой компании ранее)
         // Проверяем, есть ли у пользователя в истории вакансии от этой же компании
-        OPTIONAL MATCH (u:User {id: $user_id})-[:RATED|VIEWED]->(v2:Vacancy {company_name: v.company_name})
+        OPTIONAL MATCH (u:User {id: $user_id})-[:RATED|VIEWED|LIKED]->(v2:Vacancy {company_name: v.company_name})
         WITH v, content_score,
              CASE WHEN count(v2) > 0 THEN 1.0 ELSE 0.0 END as graph_score
         
-        // Total score
+        // Compute final score (без дизлайков)
+        WITH v, content_score, graph_score,
+             content_score * $content_weight + graph_score * $graph_weight as total_score
+        
+        // Exclude vacancies user has explicitly disliked
+        OPTIONAL MATCH (u:User {id: $user_id})-[d:DISLIKED]->(v)
+        WITH v, content_score, graph_score, total_score,
+             CASE WHEN count(d) > 0 THEN 0.0 ELSE total_score END as final_score
+        
         RETURN v.id as vacancy_id,
                content_score,
                graph_score,
-               (content_score * $content_weight + 
-                graph_score * $graph_weight) as total_score
-        ORDER BY total_score DESC
+               final_score as total_score
+        ORDER BY final_score DESC
         LIMIT $top_n
         """
 

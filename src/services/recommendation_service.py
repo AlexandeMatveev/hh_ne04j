@@ -92,7 +92,7 @@ class RecommendationService:
         params = {'skills': skills}
         
         if exclude_user_id:
-            query += " AND NOT EXISTS { MATCH (u:User {id: $exclude_user_id})-[:VIEWED|FAVORITED]->(v) }"
+            query += " AND NOT EXISTS { MATCH (u:User {id: $exclude_user_id})-[:VIEWED|:FAVORITED|:LIKED]->(v) }"
             params['exclude_user_id'] = exclude_user_id
 
         query += """
@@ -166,7 +166,7 @@ class RecommendationService:
         try:
             # Получаем навыки пользователя
             skills_result = self.neo4j.execute_query("""
-                MATCH (u:User {id: $user_id})-[:VIEWED|:RATED]->(v:Vacancy)
+                MATCH (u:User {id: $user_id})-[:VIEWED|:LIKED|:RATED]->(v:Vacancy)
                 UNWIND v.skills AS skill
                 RETURN DISTINCT skill as skill, COUNT(*) as frequency
                 ORDER BY frequency DESC
@@ -190,10 +190,10 @@ class RecommendationService:
 
             # Коллаборативные рекомендации
             collaborative_results = self._execute_recommendation_query("""
-                MATCH (u:User {id: $user_id})-[:VIEWED|:RATED]->(v:Vacancy)<-[:VIEWED|:RATED]-(other:User)
+                MATCH (u:User {id: $user_id})-[:VIEWED|:LIKED|:RATED]->(v:Vacancy)<-[:VIEWED|:LIKED|:RATED]-(other:User)
                 WHERE other.id <> $user_id
-                MATCH (other)-[:VIEWED|:RATED]->(rec:Vacancy)
-                WHERE NOT EXISTS((u)-[:VIEWED|:RATED]->(rec))
+                MATCH (other)-[:VIEWED|:LIKED|:RATED]->(rec:Vacancy)
+                WHERE NOT EXISTS((u)-[:VIEWED|:LIKED|:DISLIKED|:RATED]->(rec))
                 RETURN rec.id as id, 
                        rec.title as title,
                        rec.company_name as company_name,

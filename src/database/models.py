@@ -9,6 +9,7 @@ class FeedbackType(Enum):
     DISLIKE = "DISLIKED"
     VIEW = "VIEWED"
     APPLY = "APPLIED"
+    FAVORITE = "FAVORITED"
 
 
 # Класс Vacancy
